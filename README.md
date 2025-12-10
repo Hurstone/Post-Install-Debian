@@ -16,7 +16,7 @@ A simple Bash script to install different apps and setup the network.
 
 ## How to run :
 
-    cd Post-Install-Debian
+    cd Post-Install-Debian/
     chmod +x post-install.sh
     sudo ./post-install.sh
 
