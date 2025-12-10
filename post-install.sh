@@ -1,69 +1,140 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# -e : quitte le script si une commande retourne une erreur
+# -u : erreur si une variable non définie est utilisée
+# -o pipefail : si une commande d'un pipeline échoue, le pipeline échoue
 
-# Usage: sudo ./postinstall.sh [--network|-n] [--local-netbios]
-WIZARD=0
-LOCAL_NETBIOS=0
+# Usage: sudo ./post-install.sh [--network|-n] [--local-netbios]
+WIZARD=0           # indicateur pour activer le "wizard réseau" (non implémenté ici)
+LOCAL_NETBIOS=0    # indicateur pour activer la configuration NetBIOS locale
 
+# Boucle de traitement des arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -n|--network) WIZARD=1; shift ;;
-    --local-netbios) LOCAL_NETBIOS=1; shift ;;
-    *) echo "Unknown arg: $1"; exit 1 ;;
+    -n|--network) WIZARD=1; shift ;;        # active le mode wizard réseau
+    --local-netbios) LOCAL_NETBIOS=1; shift ;; # active les modifications NetBIOS locales
+    *) echo "Unknown arg: $1"; exit 1 ;;    # argument inconnu -> sortie
   esac
 done
 
+# Vérification d'exécution en root
 if [[ $EUID -ne 0 ]]; then
-  echo "Run as root"; exit 1
+  echo "Please run as root (sudo)." >&2
+  exit 1
 fi
 
+# Fonction utilitaire : sauvegarde d'un fichier avant modification
 backup() {
-  cp -a "$1" "$1.bak.$(date +%s)" || true
+  if [[ -e "$1" ]]; then
+    cp -a "$1" "$1.bak.$(date +%s)"
+    # cp -a préserve les permissions ; on ajoute un suffixe horodaté pour rollback
+  fi
 }
 
-echo "Updating system..."
+echo "=== Mise à jour du système ==="
+# Mise à jour des listes de paquets et mise à niveau automatique
 apt update && apt upgrade -y
 
-echo "Installing base packages..."
+echo "=== Installation des paquets de base ==="
+# Installation des outils usuels pour administration et diagnostic
 apt install -y ssh zip nmap locate ncdu curl git screen dnsutils net-tools sudo lynx
 
-echo "Installing Samba and Winbind..."
+echo "=== Installation Samba et Winbind ==="
+# Samba fournit le partage SMB/CIFS ; winbind permet l'intégration d'annuaires (ex: AD)
 apt install -y samba winbind
 
+# Si l'option --local-netbios a été fournie, on ajoute une directive de résolution
 if [[ $LOCAL_NETBIOS -eq 1 ]]; then
-  echo "Enabling NetBIOS/SMB name resolution (local only)..."
-  # smbclient / nmbd are provided by samba package; ensure nmbd enabled in smb.conf if needed
-  sed -i '/
+  echo "=== Activation (locale) de NetBIOS/SMB name resolution ==="
+  # On vérifie si la directive existe déjà dans smb.conf ; sinon on l'ajoute
+  if ! grep -q "name resolve order" /etc/samba/smb.conf 2>/dev/null; then
+    # On insère la ligne après la section [global] pour influencer l'ordre de résolution
+    sed -i '/
 
 \[global\]
 
 /a \ \ \ \ name resolve order = wins lmhosts host bcast' /etc/samba/smb.conf || true
+  fi
 fi
 
-# Modify /etc/nsswitch.conf to add 'wins' at end of hosts line if missing
+# Modifier /etc/nsswitch.conf : ajouter 'wins' à la fin de la ligne hosts si absent
 NSS=/etc/nsswitch.conf
-backup "$NSS"
-if ! grep -q '^hosts:.*wins' "$NSS"; then
-  sed -i 's/^\(hosts:.*\)$/\1 wins/' "$NSS"
+backup "$NSS"   # sauvegarde avant modification
+if grep -q '^hosts:' "$NSS"; then
+  if ! grep -q '^hosts:.*\bwins\b' "$NSS"; then
+    # Ajoute 'wins' à la fin de la ligne hosts (sécurisé si la ligne existe)
+    sed -i 's/^\(hosts:.*\)$/\1 wins/' "$NSS"
+    echo "Ajout de 'wins' à /etc/nsswitch.conf"
+  else
+    echo "'wins' déjà présent dans /etc/nsswitch.conf"
+  fi
+else
+  # Si la ligne hosts: n'existe pas, on avertit l'administrateur
+  echo "Aucune ligne 'hosts:' trouvée dans $NSS — vérifiez manuellement." >&2
 fi
 
-# Personalize root bash: uncomment lines 9-13 in /root/.bashrc (backup first)
+# Personnalisation du BASH root : décommenter lignes 9-13 si elles existent
 BASHRC=/root/.bashrc
-backup "$BASHRC"
-# Safely uncomment lines 9-13 if they exist
-nl -ba "$BASHRC" | sed -n '9,13p' >/dev/null 2>&1 || true
-for i in {9..13}; do
-  sed -i "${i}s/^#//" "$BASHRC" || true
-done
+backup "$BASHRC"   # sauvegarde du .bashrc root
+if [[ -f "$BASHRC" ]]; then
+  total_lines=$(wc -l < "$BASHRC")
+  if (( total_lines >= 9 )); then
+    # Pour chaque ligne 9 à 13, si elle commence par '#', on enlève le '#'
+    for i in $(seq 9 14); do
+      if sed -n "${i}p" "$BASHRC" | grep -q '^#'; then
+        sed -i "${i}s/^#//" "$BASHRC" || true
+      fi
+    done
+    echo "Lignes 9-13 de $BASHRC traitées (décommentées si présentes)."
+  else
+    # Si le fichier est trop court, on ne tente pas de décommenter
+    echo "$BASHRC a moins de 9 lignes, aucune modification effectuée."
+  fi
+else
+  # Si /root/.bashrc n'existe pas, on crée un fichier minimal pour éviter erreurs futures
+  echo "$BASHRC introuvable, création d'un fichier minimal."
+  cat > "$BASHRC" <<'EOF'
+# /root/.bashrc minimal
+PS1='\u@\h:\w\$ '
+EOF
+fi
 
-# Install Webmin (repo script + apt install)
-echo "Installing Webmin repository and package..."
-curl -o /tmp/webmin-setup-repo.sh https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh
-sh /tmp/webmin-setup-repo.sh
-apt update
-apt install -y webmin --install-recommends
+# Installation Webmin : téléchargement sécurisé du script d'ajout de repo puis installation
+WEBMIN_SCRIPT_URL="https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh"
+TMP_SCRIPT="/tmp/webmin-setup-repo.sh"
 
-# Bonus: bsdgames
-apt install -y bsdgames
+echo "=== Téléchargement du script d'installation Webmin ==="
+# curl -fsSL : -f échoue sur codes HTTP >=400 ; -s silence ; -S affiche erreur si échec ; -L suit redirections
+if curl -fsSL -o "$TMP_SCRIPT" "$WEBMIN_SCRIPT_URL"; then
+  # Vérifier que le fichier téléchargé n'est pas du HTML (page d'erreur)
+  if grep -qi "<!doctype\|<html" "$TMP_SCRIPT"; then
+    # Si HTML détecté, on supprime le fichier et on signale l'erreur
+    echo "Erreur : le fichier téléchargé semble être du HTML. Abandon." >&2
+    echo "Vérifiez l'URL ou la connectivité réseau." >&2
+    rm -f "$TMP_SCRIPT"
+  else
+    # Rendre exécutable et exécuter le script d'ajout du dépôt Webmin
+    chmod +x "$TMP_SCRIPT"
+    echo "Exécution du script Webmin..."
+    sh "$TMP_SCRIPT"
+    # Mise à jour des listes et installation du paquet webmin
+    apt update
+    apt install -y webmin --install-recommends
+    echo "Webmin installé. Accessible sur https://<IP-ou-FQDN>:10000"
+  fi
+else
+  # Si curl a échoué, on l'indique (ex: pas d'accès réseau ou URL invalide)
+  echo "Échec du téléchargement du script Webmin (curl a retourné une erreur)." >&2
+fi
 
-echo "Done. Webmin available at https://<IP-or-FQDN>:10000 (port 10000)."
+# Bonus : bsdgames (jeux classiques)
+echo "=== Installation bsdgames (bonus) ==="
+apt install -y bsdgames || true
+# On ignore l'erreur éventuelle pour ne pas casser le reste du script
+
+echo "=== Terminé ==="
+# Si le wizard réseau a été demandé, on rappelle qu'il n'est pas implémenté ici
+if [[ $WIZARD -eq 1 ]]; then
+  echo "Le mode wizard réseau a été demandé mais n'est pas encore implémenté dans ce script."
+  echo "Répondez aux questions demandées pour que j'ajoute la configuration réseau automatique."
+fi
