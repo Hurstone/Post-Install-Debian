@@ -4,15 +4,13 @@ set -euo pipefail
 # -u : erreur si une variable non définie est utilisée
 # -o pipefail : si une commande d'un pipeline échoue, le pipeline échoue
 
-# Usage: sudo ./post-install.sh [--network|-n] [--local-netbios]
+# Usage: sudo ./post-install.sh [--network|-n]
 WIZARD=0           # indicateur pour activer le "wizard réseau" (non implémenté ici)
-LOCAL_NETBIOS=0    # indicateur pour activer la configuration NetBIOS locale
 
 # Boucle de traitement des arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--network) WIZARD=1; shift ;;        # active le mode wizard réseau
-    --local-netbios) LOCAL_NETBIOS=1; shift ;; # active les modifications NetBIOS locales
     *) echo "Unknown arg: $1"; exit 1 ;;    # argument inconnu -> sortie
   esac
 done
@@ -43,19 +41,8 @@ echo "=== Installation Samba et Winbind ==="
 # Samba fournit le partage SMB/CIFS ; winbind permet l'intégration d'annuaires (ex: AD)
 apt install -y samba winbind
 
-# Si l'option --local-netbios a été fournie, on ajoute une directive de résolution
-if [[ $LOCAL_NETBIOS -eq 1 ]]; then
-  echo "=== Activation (locale) de NetBIOS/SMB name resolution ==="
-  # On vérifie si la directive existe déjà dans smb.conf ; sinon on l'ajoute
-  if ! grep -q "name resolve order" /etc/samba/smb.conf 2>/dev/null; then
-    # On insère la ligne après la section [global] pour influencer l'ordre de résolution
-    sed -i '/
-
-\[global\]
-
-/a \ \ \ \ name resolve order = wins lmhosts host bcast' /etc/samba/smb.conf || true
-  fi
-fi
+# Note: la configuration NetBIOS/WINS n'est plus modifiée automatiquement.
+# Si vous avez besoin d'activer NetBIOS local, modifiez /etc/samba/smb.conf manuellement.
 
 # Modifier /etc/nsswitch.conf : ajouter 'wins' à la fin de la ligne hosts si absent
 NSS=/etc/nsswitch.conf
@@ -85,7 +72,7 @@ if [[ -f "$BASHRC" ]]; then
         sed -i "${i}s/^#//" "$BASHRC" || true
       fi
     done
-    echo "Lignes 9-13 de $BASHRC traitées (décommentées si présentes)."
+    echo "Lignes 9-14 de $BASHRC traitées (décommentées si présentes)."
   else
     # Si le fichier est trop court, on ne tente pas de décommenter
     echo "$BASHRC a moins de 9 lignes, aucune modification effectuée."
@@ -133,7 +120,6 @@ apt install -y bsdgames || true
 # On ignore l'erreur éventuelle pour ne pas casser le reste du script
 
 echo "=== Terminé ==="
-# Si le wizard réseau a été demandé, on rappelle qu'il n'est pas implémenté ici
 if [[ $WIZARD -eq 1 ]]; then
   echo "Le mode wizard réseau a été demandé mais n'est pas encore implémenté dans ce script."
   echo "Répondez aux questions demandées pour que j'ajoute la configuration réseau automatique."
